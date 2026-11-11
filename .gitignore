@@ -1,0 +1,9 @@
+node_modules/
+dist/
+.env
+uploads/
+backups/
+output/
+backend/server
+test-results/
+playwright-report/

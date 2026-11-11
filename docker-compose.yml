@@ -1,0 +1,58 @@
+name: project-hub
+services:
+  postgres:
+    image: postgres:17-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: projecthub
+      POSTGRES_USER: projecthub
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Please set POSTGRES_PASSWORD in .env}
+    volumes:
+      - database:/var/lib/postgresql/data
+    healthcheck:
+      test: [CMD-SHELL, "pg_isready -U projecthub -d projecthub"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+  api:
+    build:
+      context: ./backend
+    restart: unless-stopped
+    environment:
+      PORT: 8080
+      DATABASE_URL: postgres://projecthub:${POSTGRES_PASSWORD}@postgres:5432/projecthub?sslmode=disable
+      UPLOAD_DIR: /data/uploads
+      SCC_BINARY: /usr/local/bin/scc
+      ADMIN_USERNAME: ${ADMIN_USERNAME:-admin}
+      ADMIN_PASSWORD: ${ADMIN_PASSWORD:?Please set ADMIN_PASSWORD in .env}
+      ADMIN_NAME: ${ADMIN_NAME:-管理员}
+      SECURE_COOKIE: ${SECURE_COOKIE:-true}
+      BACKUP_MASTER_KEY: ${BACKUP_MASTER_KEY:-}
+    volumes:
+      - uploads:/data/uploads
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test: [CMD, wget, -q, -O, /dev/null, http://127.0.0.1:8080/healthz]
+      interval: 10s
+      timeout: 3s
+      retries: 12
+      start_period: 15s
+  web:
+    build:
+      context: ./frontend
+    restart: unless-stopped
+    ports:
+      - "${WEB_BIND:-127.0.0.1}:${WEB_PORT:-8088}:80"
+    depends_on:
+      api:
+        condition: service_healthy
+    healthcheck:
+      test: [CMD, wget, -q, -O, /dev/null, http://127.0.0.1/]
+      interval: 15s
+      timeout: 3s
+      retries: 5
+volumes:
+  database:
+  uploads:

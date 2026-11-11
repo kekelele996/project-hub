@@ -1,0 +1,12 @@
+{
+  "name": "project-hub-verification",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "node e2e.mjs",
+    "test:browser": "playwright test --config playwright.config.mjs",
+    "test:browser:list": "playwright test --config playwright.config.mjs --list"
+  },
+  "dependencies": { "jszip": "^3.10.1" },
+  "devDependencies": { "@playwright/test": "^1.58.2" }
+}

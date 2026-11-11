@@ -1,0 +1,5 @@
+services:
+  api:
+    image: project-hub-api:latest
+  web:
+    image: project-hub-web:latest

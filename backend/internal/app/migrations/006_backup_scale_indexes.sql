@@ -1,0 +1,10 @@
+CREATE INDEX IF NOT EXISTS backup_targets_created ON backup_targets(created_at DESC,id DESC);
+CREATE INDEX IF NOT EXISTS backup_targets_account ON backup_targets(account_id);
+CREATE INDEX IF NOT EXISTS backup_targets_engineering_account ON backup_targets(engineering_id,account_id);
+CREATE INDEX IF NOT EXISTS backup_targets_engineering_owner ON backup_targets(engineering_id,lower(owner));
+CREATE INDEX IF NOT EXISTS backup_jobs_target_created ON backup_jobs(target_id,created_at DESC,id DESC);
+CREATE INDEX IF NOT EXISTS backup_jobs_target_verified ON backup_jobs(target_id,verified_at DESC) WHERE kind='sync' AND status='ready';
+CREATE INDEX IF NOT EXISTS backup_jobs_created ON backup_jobs(created_at DESC,id DESC);
+CREATE INDEX IF NOT EXISTS backup_jobs_status_created ON backup_jobs(status,created_at DESC,id DESC);
+CREATE INDEX IF NOT EXISTS backup_jobs_reservable ON backup_jobs(created_at,id) WHERE status IN ('pending','running');
+CREATE INDEX IF NOT EXISTS versions_ready_engineering ON engineering_versions(engineering_id,id) WHERE status='ready';

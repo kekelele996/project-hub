@@ -1,0 +1,898 @@
+openapi: 3.0.3
+info:
+  title: 工程台 API
+  version: 1.8.0
+  description: |
+    Cookie 会话 365 天并随访问续期。Cookie 写请求需 X-CSRF-Token（auth/me 返回）。
+    Bearer 无需 CSRF；普通成员令牌只读，管理员令牌可写。列表返回 items 和 total。
+    领取项目内独占；下载每次重新鉴权。截图由人工或外部脚本采集，平台不执行代码。
+    管理员 Bearer 上传使用 POST /api/v1/admin/engineering-versions，开放查询 /open/v1 不接收上传。
+    GitHub 灾备仅管理员可用；Token 写入后不回显，加密密钥由 BACKUP_MASTER_KEY 配置。
+    标签树固定两级：所属领域与子方向；工程只能打子方向标签，工程池列表支持 tag_ids 筛选。
+    迁移 008 新建 engineering_tags，并将旧 project_tags 的标签按项目引用的工程迁移后删除旧表。
+servers:
+  - url: http://localhost:8088
+    description: 本机平台入口
+  - url: http://localhost:8089
+    description: 独立 Compose 验收入口
+security:
+  - cookieAuth: []
+  - bearerAuth: []
+paths:
+  /api/v1/auth/login:
+    post:
+      summary: 登录并创建一年会话
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [username, password]
+              properties:
+                username: {type: string}
+                password: {type: string}
+      responses:
+        '200':
+          description: 登录成功
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Auth'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+  /api/v1/auth/me:
+    get:
+      summary: 当前用户与 CSRF，续期会话
+      responses:
+        '200':
+          description: 当前身份
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Auth'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+  /api/v1/auth/logout:
+    post:
+      summary: 撤销会话
+      responses:
+        '204': {description: 已退出}
+  /api/v1/auth/password:
+    post:
+      summary: 改密码并撤销全部会话与令牌
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [current_password, password]
+              properties:
+                current_password: {type: string}
+                password: {type: string, minLength: 8}
+      responses:
+        '204': {description: 已修改}
+  /api/v1/admin/users:
+    get:
+      summary: 管理员分页查询用户
+      parameters:
+        - {$ref: '#/components/parameters/Page'}
+        - {$ref: '#/components/parameters/PageSize'}
+        - {in: query, name: q, description: 搜索用户名和姓名, schema: {type: string}}
+        - {in: query, name: role, description: 省略或 all 表示全部角色, schema: {type: string, enum: [admin, member, all]}}
+        - {in: query, name: active, description: 省略或 all 表示全部账号状态, schema: {type: string, enum: ['true', 'false', all]}}
+      responses:
+        '200': {$ref: '#/components/responses/List'}
+        '400': {description: 无效角色或账号状态}
+    post:
+      summary: 创建用户
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [username, name, password, role]
+              properties:
+                username: {type: string}
+                name: {type: string}
+                password: {type: string}
+                role: {type: string, enum: [admin, member]}
+      responses:
+        '201': {description: 用户已创建}
+  /api/v1/admin/users/{id}:
+    parameters: [{$ref: '#/components/parameters/ID'}]
+    patch:
+      summary: 修改姓名、角色、active、密码；停用撤销凭证
+      requestBody:
+        content:
+          application/json:
+            schema: {type: object, properties: {name: {type: string}, role: {type: string}, active: {type: boolean}, password: {type: string}}}
+      responses:
+        '200': {description: 已更新}
+  /api/v1/admin/engineering:
+    get:
+      summary: 工程池，技术栈、标签、文件数量、分析和归档状态服务端筛选
+      parameters:
+        - {$ref: '#/components/parameters/Page'}
+        - {$ref: '#/components/parameters/PageSize'}
+        - {in: query, name: q, schema: {type: string}}
+        - {in: query, name: language, schema: {type: string}}
+        - in: query
+          name: tech_stack
+          description: 大小写不敏感的多选 OR 条件，支持逗号分隔或重复参数
+          style: form
+          explode: false
+          schema: {type: array, items: {type: string}}
+        - {$ref: '#/components/parameters/TagIDs'}
+        - {$ref: '#/components/parameters/MinFiles'}
+        - {$ref: '#/components/parameters/MaxFiles'}
+        - {in: query, name: status, schema: {type: string, enum: [pending, ready, failed, all]}}
+        - {in: query, name: archived, description: false 仅未归档，true 仅归档，all 两者均包含, schema: {type: string, enum: ['false', 'true', all], default: 'false'}}
+        - in: query
+          name: exclude_project
+          description: 排除该项目仍有效的工程引用；软移除的历史引用不排除，管理员无需加入该项目
+          schema: {type: string, format: uuid}
+      responses:
+        '200': {$ref: '#/components/responses/List'}
+        '400': {description: 无效状态、exclude_project 不是 UUID 或标签筛选无效}
+  /api/v1/admin/engineering/{id}:
+    parameters: [{$ref: '#/components/parameters/ID'}]
+    get:
+      summary: 工程及所有版本，返回 engineering（含 tags）和 versions（每项含 tags）
+      responses:
+        '200': {description: 工程、全部版本及工程标签}
+    patch:
+      summary: 修改逻辑工程 name/description/archived 与 tag_ids，不覆盖版本
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                name: {type: string}
+                description: {type: string}
+                archived: {type: boolean}
+                tag_ids:
+                  type: array
+                  maxItems: 32
+                  description: 工程子方向标签，最多 32 个（重复标签去重）；每项必须是已存在的子方向标签，不能使用领域标签。传该字段整体替换（[] 清空），不传保持原值；审计 details 含 tag_ids
+                  items: {type: string, format: uuid}
+      responses:
+        '200': {description: 已更新}
+        '400': {description: 工程名称、说明或工程标签无效}
+  /api/v1/admin/engineering-versions:
+    post:
+      summary: 上传工程，异步分析并自动创建私有灾备仓库
+      description: |
+        管理员 Cookie 会话或管理员 Bearer 令牌可调用；Bearer 无需 Cookie 和 X-CSRF-Token。
+        成员 Bearer 令牌上传返回403。新工程需要 name；追加版本使用 engineering_id。
+        GitHub 地址及固定 commit/tag、一个 ZIP、一张启动截图和1至6张功能截图均须提供。
+        灾备账号是全局配置：上传自动使用所有已验证、启用且未到期的 GitHub 灾备账号，不需要传账号 ID 或先手动绑定仓库。
+        backup_repo_name 可选，新工程省略默认 engineering；仓库完整名为 ph-<短名>-<工程 UUID 去除连字符>。
+        每个启用账号各建一个私有仓库，所有者为账号 login；已有手动绑定目标复用，停用目标或关闭自动同步不会被自动重新启用。
+        追加版本省略仓库名沿用原名，托管仓库绑定后改变名称返回409。工程改名不影响灾备仓库。
+        新增并启用灾备账号时，后台自动给已有未归档工程的所有 ready 版本补建副本；历史工程无仓库名时默认 engineering。
+        旧字段 backup_account_id 已弃用，若传入仅校验账号有效性，不限制自动备份的全局账号范围。
+        上传事务保存自动同步目标，分析 ready 后后台创建私有仓库（含初始 README），保存 ZIP、截图与 manifest 为版本 Release。
+        每个新版本独立 Release，保留旧版；不会推送源码 Git 历史。建仓权限不足等异步失败不撤销本地上传，可查询并重试备份任务。
+        使用 classic PAT 需 repo 权限（含私有建仓）；细粒度 PAT 必须支持创建及访问新仓库、Contents 读写，限定已有仓库的 Token 无法用于自动建仓。
+        201 仅表示本地上传成功，不代表 GitHub 灾备完成；返回 job_id 后轮询分析接口，随后按 engineering_id 查询所有备份任务直到 ready（逐文件 SHA-256 校验完成）。
+        未配置密钥或暂无可用账号时，API 仍保存本地上传，backup_status=unconfigured、backup_targets=[]；配置完成后后台自动补齐。页面上传要求至少一个可用全局账号。
+        新建工程可选 tag_ids（JSON 字符串数组，最多 32 个且只能是已存在的子方向标签）同时设置工程标签；追加版本忽略该字段。
+        不会启动上传的代码。
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              required: [github_url, github_ref, zip, startup_screenshot, feature_screenshots]
+              properties:
+                name: {type: string, description: 创建新工程时必填}
+                description: {type: string}
+                engineering_id: {type: string, format: uuid, description: 留空创建新工程，否则追加版本}
+                tech_stack: {type: string, description: 'JSON 数组字符串，例如 ["Go","React"]'}
+                tag_ids: {type: string, description: '可选 JSON 字符串数组，例如 ["5f0c…"]；仅新建工程生效，追加版本忽略。最多 32 个且只能是已存在的子方向标签，否则 400'}
+                github_url: {type: string, format: uri}
+                github_ref: {type: string, description: 固定 commit 或 tag}
+                backup_account_id: {type: string, format: uuid, deprecated: true, description: 旧客户端兼容字段，仅校验账号有效性；不限制全局自动备份范围，推荐省略}
+                backup_repo_name:
+                  type: string
+                  minLength: 3
+                  maxLength: 48
+                  pattern: '^[a-z0-9](?:[a-z0-9]|-(?!-)){1,46}[a-z0-9]$'
+                  example: elderly-care
+                  description: 可选仓库短名；新工程省略默认 engineering，追加版本省略沿用。小写字母、数字、单个连字符，首尾必须为字母或数字，禁止连续连字符。系统追加 ph- 前缀和工程 ID。
+                zip: {type: string, format: binary, description: 最大 256 MiB}
+                startup_screenshot: {type: string, format: binary, description: 一张 PNG/JPEG/GIF/WebP，每张最大 12 MiB}
+                feature_screenshots: {type: array, minItems: 1, maxItems: 6, items: {type: string, format: binary}, description: PNG/JPEG/GIF/WebP，每张最大 12 MiB}
+      responses:
+        '201':
+          description: 本地版本及分析任务已保存；自动关联所有可用全局灾备账号，GitHub 建仓和上传在分析完成后异步执行
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  engineering_id: {type: string, format: uuid}
+                  version_id: {type: string, format: uuid}
+                  job_id: {type: string, format: uuid}
+                  backup_status: {type: string, enum: [waiting_analysis, unconfigured], description: waiting_analysis 表示已有可用目标等待分析；unconfigured 表示暂无可用目标，尚未灾备}
+                  backup_targets:
+                    type: array
+                    description: 当前启用且自动同步的全部灾备目标；每个账号独立副本
+                    items:
+                      type: object
+                      properties:
+                        id: {type: string, format: uuid}
+                        repository_url: {type: string, format: uri, description: 预定仓库地址，远端可能尚未创建}
+                  backup_target_id: {type: string, format: uuid, deprecated: true, description: 兼容字段，首个目标 ID；多个副本请使用 backup_targets}
+                  backup_repository_url: {type: string, format: uri, deprecated: true, description: 兼容字段，首个预定仓库地址}
+        '400': {description: 上传字段、灾备仓库名、ZIP 大小或截图无效}
+        '404': {description: 工程或灾备账号不存在}
+        '409': {description: 工程已归档、账号停用或到期、同账号灾备仓库名与已绑定名称不一致}
+        '503': {description: 指定灾备字段但未配置 BACKUP_MASTER_KEY}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+  /api/v1/admin/analysis-jobs/{id}:
+    parameters: [{$ref: '#/components/parameters/ID'}]
+    get:
+      summary: 轮询分析，status pending/ready/failed
+      responses:
+        '200': {description: 任务状态及 error}
+  /api/v1/admin/analysis-jobs/{id}/retry:
+    parameters: [{$ref: '#/components/parameters/ID'}]
+    post:
+      summary: 重试失败任务
+      responses:
+        '200': {description: 重试已排队}
+        '409': {$ref: '#/components/responses/Conflict'}
+  /api/v1/admin/engineering-versions/{id}/zip:
+    parameters: [{$ref: '#/components/parameters/ID'}]
+    get:
+      summary: 管理员下载固定版本
+      responses:
+        '200': {$ref: '#/components/responses/ZIP'}
+  /api/v1/assets/{id}:
+    parameters: [{$ref: '#/components/parameters/ID'}]
+    get:
+      summary: 有权浏览对应工程的用户读取真实截图
+      responses:
+        '200': {description: PNG/JPEG/GIF/WebP 图像流}
+  /api/v1/me/projects:
+    get:
+      summary: 我的项目列表
+      parameters:
+        - {$ref: '#/components/parameters/Page'}
+        - {$ref: '#/components/parameters/PageSize'}
+        - {$ref: '#/components/parameters/ProjectSearch'}
+        - {$ref: '#/components/parameters/ProjectStatus'}
+      responses:
+        '200': {$ref: '#/components/responses/List'}
+  /api/v1/admin/projects:
+    get:
+      summary: 管理员项目列表，支持 q/status/page/page_size
+      parameters:
+        - {$ref: '#/components/parameters/Page'}
+        - {$ref: '#/components/parameters/PageSize'}
+        - {$ref: '#/components/parameters/ProjectSearch'}
+        - {$ref: '#/components/parameters/ProjectStatus'}
+      responses:
+        '200': {$ref: '#/components/responses/List'}
+    post:
+      summary: 创建项目，确认工程与成员列表
+      requestBody:
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/ProjectInput'}
+      responses:
+        '201': {description: 创建项目}
+  /api/v1/projects/{id}:
+    parameters: [{$ref: '#/components/parameters/ID'}]
+    get:
+      summary: 授权项目详情
+      responses:
+        '200': {description: 项目信息及 engineering_count/claimed_count/member_count}
+  /api/v1/admin/projects/{id}:
+    parameters: [{$ref: '#/components/parameters/ID'}]
+    patch:
+      summary: 部分更新项目基础字段
+      requestBody:
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/ProjectInput'}
+      responses:
+        '200': {description: 已更新}
+  /api/v1/projects/{id}/engineering:
+    parameters: [{$ref: '#/components/parameters/ID'}]
+    get:
+      summary: 分页筛选工程，scope all/available/mine，隐藏无权读取的 ZIP 和 GitHub 信息
+      parameters:
+        - {$ref: '#/components/parameters/Page'}
+        - {$ref: '#/components/parameters/PageSize'}
+        - {in: query, name: q, description: 搜索工程名称和描述, schema: {type: string}}
+        - {in: query, name: language, schema: {type: string}}
+        - {$ref: '#/components/parameters/MinFiles'}
+        - {$ref: '#/components/parameters/MaxFiles'}
+        - {$ref: '#/components/parameters/EngineeringScope'}
+      responses:
+        '200': {$ref: '#/components/responses/List'}
+  /api/v1/admin/projects/{id}/engineering-scope:
+    parameters: [{$ref: '#/components/parameters/ID'}]
+    post:
+      summary: 追加/移除/升级工程，已领取不能移除或升级
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                add: {type: array, items: {type: string, format: uuid}}
+                remove: {type: array, items: {type: string, format: uuid}}
+                upgrades:
+                  type: array
+                  items: {type: object, properties: {engineering_id: {type: string, format: uuid}, version_id: {type: string, format: uuid}}}
+      responses:
+        '200': {description: 范围已更新}
+        '409': {$ref: '#/components/responses/Conflict'}
+  /api/v1/projects/{id}/members:
+    parameters: [{$ref: '#/components/parameters/ID'}]
+    get:
+      summary: 查询项目成员
+      responses:
+        '200': {$ref: '#/components/responses/List'}
+  /api/v1/admin/projects/{id}/members:
+    parameters: [{$ref: '#/components/parameters/ID'}]
+    post:
+      summary: 按 add/remove 用户 ID 修改成员，移除自动回收
+      requestBody:
+        content:
+          application/json:
+            schema: {type: object, properties: {add: {type: array, items: {type: string, format: uuid}}, remove: {type: array, items: {type: string, format: uuid}}}}
+      responses:
+        '200': {description: 成员已更新}
+  /api/v1/projects/{id}/engineering/{engineeringId}/claim:
+    parameters: [{$ref: '#/components/parameters/ID'}, {$ref: '#/components/parameters/EngineeringID'}]
+    post:
+      summary: 原子领取，首次 201，本人重试 200，竞争 409
+      responses:
+        '201': {description: 领取记录}
+        '200': {description: 已领取记录}
+        '409': {$ref: '#/components/responses/Conflict'}
+  /api/v1/projects/{id}/engineering/{engineeringId}/release:
+    parameters: [{$ref: '#/components/parameters/ID'}, {$ref: '#/components/parameters/EngineeringID'}]
+    post:
+      summary: 归还本人当前领取，核对 claim_id 防止旧请求
+      requestBody:
+        content:
+          application/json:
+            schema: {type: object, required: [claim_id], properties: {claim_id: {type: string, format: uuid}}}
+      responses:
+        '204': {description: 已归还}
+        '409': {$ref: '#/components/responses/Conflict'}
+  /api/v1/projects/{id}/engineering/{engineeringId}/zip:
+    parameters: [{$ref: '#/components/parameters/ID'}, {$ref: '#/components/parameters/EngineeringID'}]
+    get:
+      summary: 当前领取者和管理员下载，过期仍有效
+      responses:
+        '200': {$ref: '#/components/responses/ZIP'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+  /api/v1/admin/claims/{id}/reclaim:
+    parameters: [{$ref: '#/components/parameters/ID'}]
+    post:
+      summary: 管理员回收
+      responses:
+        '200': {description: 已回收}
+  /api/v1/admin/claims/{id}/transfer:
+    parameters: [{$ref: '#/components/parameters/ID'}]
+    post:
+      summary: 原子转交给当前项目内有效成员
+      requestBody:
+        content:
+          application/json:
+            schema: {type: object, required: [user_id], properties: {user_id: {type: string, format: uuid}}}
+      responses:
+        '200': {description: 已转交}
+  /api/v1/tags:
+    get:
+      summary: 两级标签树，所有登录用户可读
+      responses:
+        '200':
+          description: items 为所属领域，children 为子方向；total 为含子方向的全部标签数
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  items: {type: array, items: {$ref: '#/components/schemas/Tag'}}
+                  total: {type: integer, description: 全部标签数，含子方向}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+  /api/v1/admin/tags:
+    post:
+      summary: 创建所属领域或子方向
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name]
+              properties:
+                name: {type: string, minLength: 1, maxLength: 40, description: trim 后 1~40 字符}
+                parent_id: {type: string, format: uuid, nullable: true, description: 省略或 null 创建领域；非空必须是已存在的领域，且父级不能再有父级}
+                sort_order: {type: integer, description: 省略时取同父级最大排序 +10，无同级为 10}
+      responses:
+        '201':
+          description: 已创建，engineering_count 为当前值，children 为空
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Tag'}
+        '400': {description: 名称无效、所属领域不存在或标签树超过两级}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '409': {description: 同一层级下名称重复}
+  /api/v1/admin/tags/{id}:
+    parameters: [{$ref: '#/components/parameters/ID'}]
+    patch:
+      summary: 修改标签名称或排序；传非空 parent_id 返回 400，不支持移动层级
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                name: {type: string, minLength: 1, maxLength: 40, description: trim 后 1~40 字符}
+                sort_order: {type: integer}
+      responses:
+        '200':
+          description: 已更新，children 为空
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Tag'}
+        '400': {description: 名称无效或试图移动所属领域}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '404': {description: 标签不存在}
+        '409': {description: 同一层级下名称重复}
+    delete:
+      summary: 删除标签；有子方向或被项目使用时拒绝
+      responses:
+        '204': {description: 已删除}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '404': {description: 标签不存在}
+        '409': {description: 有子方向或被项目使用}
+  /api/v1/tokens:
+    get:
+      summary: 我的令牌元数据，不返回明文
+      responses:
+        '200': {$ref: '#/components/responses/List'}
+    post:
+      summary: 创建令牌，明文 token 仅展示一次
+      requestBody:
+        content:
+          application/json:
+            schema: {type: object, required: [name], properties: {name: {type: string}}}
+      responses:
+        '201': {description: 令牌和元数据}
+  /api/v1/tokens/{id}:
+    parameters: [{$ref: '#/components/parameters/ID'}]
+    delete:
+      summary: 立即撤销令牌
+      responses:
+        '200': {description: 已撤销}
+  /api/v1/admin/overview:
+    get:
+      summary: 工程/任务/项目/领取/用户真实统计与 recent_events
+      responses:
+        '200': {description: 概览}
+  /api/v1/admin/audit-events:
+    get:
+      summary: 按 q/user_id/project_id/engineering_id/action 分页审计
+      responses:
+        '200': {$ref: '#/components/responses/List'}
+  /open/v1/me/projects:
+    get:
+      summary: Bearer 身份的项目
+      security: [{bearerAuth: []}]
+      parameters:
+        - {$ref: '#/components/parameters/Page'}
+        - {$ref: '#/components/parameters/PageSize'}
+        - {$ref: '#/components/parameters/ProjectSearch'}
+        - {$ref: '#/components/parameters/ProjectStatus'}
+      responses:
+        '200': {$ref: '#/components/responses/List'}
+  /open/v1/projects/{id}/engineering:
+    parameters: [{$ref: '#/components/parameters/ID'}]
+    get:
+      summary: 成员查询可领取和本人领取工程，管理员查询全部范围
+      security: [{bearerAuth: []}]
+      parameters:
+        - {$ref: '#/components/parameters/Page'}
+        - {$ref: '#/components/parameters/PageSize'}
+        - {in: query, name: q, description: 搜索工程名称和描述, schema: {type: string}}
+        - {in: query, name: language, schema: {type: string}}
+        - {$ref: '#/components/parameters/MinFiles'}
+        - {$ref: '#/components/parameters/MaxFiles'}
+        - {$ref: '#/components/parameters/EngineeringScope'}
+      responses:
+        '200': {$ref: '#/components/responses/List'}
+  /open/v1/engineering/{id}:
+    parameters:
+      - {$ref: '#/components/parameters/ID'}
+      - {in: query, name: project_id, required: true, schema: {type: string, format: uuid}}
+    get:
+      summary: 工程授权详情与 zip_url，查询项目固定版本
+      security: [{bearerAuth: []}]
+      responses:
+        '200': {description: 公开摘要；持有人增加 GitHub 和受鉴权下载地址}
+        '403': {$ref: '#/components/responses/Forbidden'}
+  /open/v1/projects/{id}/engineering/{engineeringId}/zip:
+    parameters: [{$ref: '#/components/parameters/ID'}, {$ref: '#/components/parameters/EngineeringID'}]
+    get:
+      summary: Bearer 鉴权 ZIP 下载
+      security: [{bearerAuth: []}]
+      responses:
+        '200': {$ref: '#/components/responses/ZIP'}
+  /api/v1/admin/github-accounts:
+    get:
+      summary: 查询 GitHub 账号与主密钥配置状态，仅返回脱敏凭证元数据
+      parameters:
+        - {$ref: '#/components/parameters/Page'}
+        - {$ref: '#/components/parameters/PageSize'}
+      responses:
+        '200':
+          description: 账号列表
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  configured: {type: boolean}
+                  usable_total: {type: integer, description: 全部账号中已验证、启用且未到期的数量，不受分页影响}
+                  items: {type: array, items: {$ref: '#/components/schemas/GitHubAccount'}}
+                  total: {type: integer}
+        '403': {$ref: '#/components/responses/Forbidden'}
+    post:
+      summary: 验证账号并加密保存 GitHub Token
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name, token]
+              properties:
+                name: {type: string}
+                token: {type: string, format: password, writeOnly: true}
+                expires_at: {type: string, format: date-time, nullable: true}
+      responses:
+        '201':
+          description: 已保存，不返回 Token
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/GitHubAccount'}
+        '400': {description: 信息无效}
+        '422': {description: GitHub 验证未通过}
+        '503': {description: 未配置凭证主密钥}
+  /api/v1/admin/github-accounts/{id}:
+    parameters: [{$ref: '#/components/parameters/ID'}]
+    patch:
+      summary: 更新账号名称、Token、状态或本地到期时间
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                name: {type: string}
+                token: {type: string, format: password, writeOnly: true}
+                active: {type: boolean}
+                expires_at: {type: string, format: date-time, nullable: true}
+      responses:
+        '200': {description: 已更新，Token 替换需要重新验证}
+        '400': {description: 无效信息或凭证}
+        '404': {description: 账号不存在}
+        '409': {description: 账号已被并发修改，请刷新重试}
+        '422': {description: GitHub 验证未通过}
+        '503': {description: 未配置主密钥或凭证解密失败}
+  /api/v1/admin/github-accounts/{id}/verify:
+    parameters: [{$ref: '#/components/parameters/ID'}]
+    post:
+      summary: 重新验证已保存 GitHub 凭证
+      responses:
+        '200': {description: 验证通过}
+        '404': {description: 账号不存在}
+        '409': {description: 账号已被并发修改，请刷新重试}
+        '422': {description: GitHub 验证失败}
+        '503': {description: 未配置主密钥或凭证解密失败}
+  /api/v1/admin/backup-targets:
+    get:
+      summary: 分页查询工程备份仓库
+      description: 每页默认20条，最多100条；按 created_at DESC、id DESC 稳定排序。搜索和筛选在服务端执行，total 是筛选后的总数。
+      parameters:
+        - {$ref: '#/components/parameters/Page'}
+        - {$ref: '#/components/parameters/PageSize'}
+        - {in: query, name: group_by, schema: {type: string, enum: [engineering]}, description: engineering 时按工程合并多个 GitHub 账号的备份仓库；total 为工程数，展开工程后用 engineering_id 查询明细}
+        - {in: query, name: engineering_id, schema: {type: string, format: uuid}}
+        - {in: query, name: account_id, schema: {type: string, format: uuid}}
+        - {in: query, name: q, schema: {type: string, maxLength: 200}, description: 工程名或 owner/repo 的大小写不敏感子串，特殊字符按字面匹配}
+        - {in: query, name: enabled, schema: {type: boolean}, description: 留空表示全部仓库}
+      responses:
+        '200':
+          description: 备份目标列表
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  items: {type: array, items: {$ref: '#/components/schemas/BackupTarget'}}
+                  total: {type: integer}
+        '400': {description: 标识、搜索词或启用状态无效}
+        '403': {$ref: '#/components/responses/Forbidden'}
+    post:
+      summary: 绑定有写权限且已初始化的私有仓库
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [engineering_id, account_id, owner, repo]
+              properties:
+                engineering_id: {type: string, format: uuid}
+                account_id: {type: string, format: uuid}
+                owner: {type: string}
+                repo: {type: string}
+                auto_sync: {type: boolean, default: true}
+      responses:
+        '201':
+          description: 仓库已绑定
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/BackupTarget'}
+        '400': {description: 工程、账号或仓库名称无效}
+        '404': {description: 工程或账号不存在}
+        '422': {description: 仓库非私有、无写权限、尚未初始化或 GitHub 请求失败}
+        '409': {$ref: '#/components/responses/Conflict'}
+        '503': {description: 未配置主密钥或凭证解密失败}
+  /api/v1/admin/backup-targets/{id}:
+    parameters: [{$ref: '#/components/parameters/ID'}]
+    patch:
+      summary: 切换自动同步与目标启用状态，保留远端备份
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                enabled: {type: boolean}
+                auto_sync: {type: boolean}
+      responses:
+        '200': {description: 已更新}
+        '404': {description: 目标不存在}
+  /api/v1/admin/backup-targets/{id}/sync:
+    parameters: [{$ref: '#/components/parameters/ID'}]
+    post:
+      summary: 手动同步 ready 版本，省略 version_id 使用最新 ready 版本
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                version_id: {type: string, format: uuid}
+      responses:
+        '202':
+          description: 返回已入队或已存在的任务
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/BackupJob'}
+        '409': {$ref: '#/components/responses/Conflict'}
+  /api/v1/admin/backup-jobs:
+    get:
+      summary: 分页查询备份和恢复任务
+      description: 每页默认20条，最多100条。默认按 created_at DESC、id DESC 返回任务；repository 参数指定单仓库时新版在前。repository 和 engineering 分组按最近记录时间降序、分组标识稳定排序；version 分组按版本号降序，必须指定工程。先对分组分页，再加载记录，total 为当前筛选下的任务或分组数量。
+      parameters:
+        - {in: query, name: group_by, schema: {type: string, enum: [repository, engineering, version]}, description: repository 按仓库分组；engineering 按工程合并所有账号和仓库；两者 items 返回 BackupRepositoryGroup。version 必须提供 engineering_id，返回 BackupVersionGroup，按新版在前分页，每个版本包含全部匹配账号记录，不跨页拆散。total 为当前分组数，摘要数量按筛选计算。}
+        - {in: query, name: repository, schema: {type: string, maxLength: 201}, description: 指定 owner/repo，忽略大小写精确匹配；展开仓库后用此参数独立分页加载记录。}
+        - {$ref: '#/components/parameters/Page'}
+        - {$ref: '#/components/parameters/PageSize'}
+        - {in: query, name: engineering_id, schema: {type: string, format: uuid}}
+        - {in: query, name: target_id, schema: {type: string, format: uuid}}
+        - {in: query, name: account_id, schema: {type: string, format: uuid}}
+        - {in: query, name: q, schema: {type: string, maxLength: 200}, description: 工程名或 owner/repo 的大小写不敏感子串，特殊字符按字面匹配}
+        - {in: query, name: status, schema: {type: string, enum: [pending, running, ready, failed]}}
+        - {in: query, name: kind, schema: {type: string, enum: [sync, restore]}}
+      responses:
+        '200':
+          description: 任务列表
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  items: {type: array, items: {oneOf: [{$ref: '#/components/schemas/BackupJob'}, {$ref: '#/components/schemas/BackupRepositoryGroup'}, {$ref: '#/components/schemas/BackupVersionGroup'}]}}
+                  total: {type: integer}
+        '400': {description: 标识、搜索词、状态或类型无效}
+  /api/v1/admin/backup-jobs/{id}/retry:
+    parameters: [{$ref: '#/components/parameters/ID'}]
+    post:
+      summary: 重试失败的任务，保持版本及仓库绑定
+      responses:
+        '202': {description: 任务已重新入队}
+        '409': {$ref: '#/components/responses/Conflict'}
+  /api/v1/admin/backup-jobs/{id}/restore:
+    parameters: [{$ref: '#/components/parameters/ID'}]
+    post:
+      summary: 从已校验副本恢复原版本 ZIP 与截图，先校验后替换
+      responses:
+        '202': {description: 恢复任务已入队}
+        '409': {$ref: '#/components/responses/Conflict'}
+components:
+  securitySchemes:
+    cookieAuth: {type: apiKey, in: cookie, name: projecthub_session}
+    bearerAuth: {type: http, scheme: bearer}
+  parameters:
+    ID: {in: path, name: id, required: true, schema: {type: string, format: uuid}}
+    EngineeringID: {in: path, name: engineeringId, required: true, schema: {type: string, format: uuid}}
+    Page: {in: query, name: page, schema: {type: integer, minimum: 1, default: 1}}
+    PageSize: {in: query, name: page_size, schema: {type: integer, minimum: 1, maximum: 100, default: 20}}
+    ProjectSearch: {in: query, name: q, description: 搜索项目名称和描述, schema: {type: string}}
+    ProjectStatus:
+      in: query
+      name: status
+      description: active/upcoming/expired 分别为开放时间内/未开始/已结束的 active 项目；paused/archived 按基础状态筛选，省略或 all 表示全部
+      schema: {type: string, enum: [active, upcoming, expired, paused, archived, all]}
+    TagIDs:
+      in: query
+      name: tag_ids
+      description: 工程池标签筛选，支持重复参数或逗号分隔（重复标签去重），最多 50 个；选择领域包含其全部子方向，多个标签为 OR，省略或空表示不过滤；超过 50 个、不是 UUID 或标签不存在返回 400
+      style: form
+      explode: false
+      schema: {type: array, maxItems: 50, items: {type: string, format: uuid}}
+    MinFiles: {in: query, name: min_files, description: 最少源码文件数量, schema: {type: integer, minimum: 0}}
+    MaxFiles: {in: query, name: max_files, description: 最多源码文件数量，0 或省略表示不限, schema: {type: integer, minimum: 0}}
+    EngineeringScope: {in: query, name: scope, description: 开放接口中成员即使选择 all 也不会返回他人的领取工程, schema: {type: string, enum: [all, available, mine]}}
+  responses:
+    List:
+      description: 分页结果
+      content:
+        application/json:
+          schema: {type: object, properties: {items: {type: array, items: {type: object}}, total: {type: integer}}}
+    Unauthorized: {description: 身份过期或令牌撤销}
+    Forbidden: {description: 权限不足或 CSRF 校验失败}
+    Conflict: {description: 日期、范围或领取状态冲突}
+    ZIP:
+      description: ZIP 字节流，Content-Disposition 提供文件名
+      content:
+        application/zip:
+          schema: {type: string, format: binary}
+  schemas:
+    GitHubAccount:
+      type: object
+      properties:
+        id: {type: string, format: uuid}
+        name: {type: string}
+        login: {type: string}
+        token_suffix: {type: string}
+        active: {type: boolean}
+        expires_at: {type: string, format: date-time, nullable: true}
+        verified_at: {type: string, format: date-time, nullable: true}
+        last_error: {type: string}
+        created_at: {type: string, format: date-time}
+        updated_at: {type: string, format: date-time}
+        status: {type: string, enum: [active, disabled, expired, error]}
+    BackupTarget:
+      type: object
+      properties:
+        id: {type: string, format: uuid}
+        engineering_id: {type: string, format: uuid}
+        engineering_name: {type: string}
+        account_id: {type: string, format: uuid}
+        account_name: {type: string}
+        login: {type: string}
+        owner: {type: string}
+        repo: {type: string}
+        managed: {type: boolean, description: true 表示上传时配置的自动建仓目标；false 表示手动绑定的已有仓库}
+        auto_sync: {type: boolean}
+        enabled: {type: boolean}
+        last_status: {type: string, enum: ['', pending, running, ready, failed]}
+        last_error: {type: string}
+        last_synced_at: {type: string, format: date-time, nullable: true}
+        created_at: {type: string, format: date-time}
+        updated_at: {type: string, format: date-time}
+    BackupTargetGroup:
+      type: object
+      properties:
+        engineering_id: {type: string, format: uuid}
+        engineering_name: {type: string}
+        account_count: {type: integer}
+        repository_count: {type: integer}
+        enabled_count: {type: integer}
+        disabled_count: {type: integer}
+    BackupRepositoryGroup:
+      type: object
+      properties:
+        engineering_id: {type: string, description: engineering 分组时为工程UUID；repository 分组为空字符串}
+        repository_count: {type: integer}
+        account_count: {type: integer}
+        owner: {type: string}
+        repo: {type: string}
+        engineering_name: {type: string, description: 同仓库涉及多个工程时显示其中一个工程名}
+        engineering_count: {type: integer}
+        version_count: {type: integer, description: 当前筛选下不同版本ID数量，同版本多次任务仅计一次}
+        job_count: {type: integer}
+        ready_count: {type: integer}
+        failed_count: {type: integer}
+        pending_count: {type: integer}
+        running_count: {type: integer}
+        latest_at: {type: string, format: date-time}
+    BackupVersionGroup:
+      type: object
+      properties:
+        version_id: {type: string, format: uuid}
+        version_number: {type: integer}
+        jobs: {type: array, items: {$ref: '#/components/schemas/BackupJob'}}
+    BackupJob:
+      type: object
+      properties:
+        id: {type: string, format: uuid}
+        target_id: {type: string, format: uuid}
+        version_id: {type: string, format: uuid}
+        engineering_id: {type: string, format: uuid}
+        engineering_name: {type: string}
+        account_name: {type: string}
+        version_number: {type: integer}
+        owner: {type: string}
+        repo: {type: string}
+        kind: {type: string, enum: [sync, restore]}
+        status: {type: string, enum: [pending, running, ready, failed]}
+        error: {type: string}
+        release_url: {type: string, format: uri}
+        zip_sha256: {type: string}
+        verified_at: {type: string, format: date-time, nullable: true}
+        created_at: {type: string, format: date-time}
+        finished_at: {type: string, format: date-time, nullable: true}
+    Auth:
+      type: object
+      properties:
+        csrf: {type: string}
+        user:
+          type: object
+          properties:
+            id: {type: string, format: uuid}
+            username: {type: string}
+            name: {type: string}
+            role: {type: string, enum: [admin, member]}
+            active: {type: boolean}
+    ProjectInput:
+      type: object
+      properties:
+        name: {type: string}
+        description: {type: string}
+        start_at: {type: string, format: date-time}
+        end_at: {type: string, format: date-time}
+        tech_stack: {type: array, items: {type: string}}
+        min_files: {type: integer, minimum: 0}
+        max_files: {type: integer, minimum: 0, description: 0 表示不限}
+        status: {type: string, enum: [active, paused, archived]}
+        engineering_ids: {type: array, items: {type: string, format: uuid}}
+        member_ids: {type: array, items: {type: string, format: uuid}}
+    Tag:
+      type: object
+      properties:
+        id: {type: string, format: uuid}
+        name: {type: string}
+        parent_id: {type: string, format: uuid, nullable: true, description: null 表示所属领域}
+        sort_order: {type: integer}
+        engineering_count: {type: integer, description: 本标签及全部后代标签关联的不同工程数}
+        children:
+          type: array
+          description: 子方向；叶子标签为 []。领域按 sort_order、名称排序，子方向按「其他」最后再按 sort_order、名称排序
+          items: {$ref: '#/components/schemas/Tag'}
+    EngineeringTag:
+      type: object
+      properties:
+        id: {type: string, format: uuid}
+        name: {type: string, description: 子方向名称}
+        parent_id: {type: string, format: uuid, description: 所属领域 ID}
+        parent_name: {type: string, description: 所属领域名称}
