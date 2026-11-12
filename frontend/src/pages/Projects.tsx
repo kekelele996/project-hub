@@ -1067,6 +1067,7 @@ export function ProjectDetail() {
                     <th>工程 / 版本</th>
                     <th>语言构成</th>
                     <th>源码文件</th>
+                    <th>分类</th>
                     <th>领取状态</th>
                     {tab === "claims" && <th>领取时间</th>}
                     <th className="table-action-heading">操作</th>
@@ -1112,6 +1113,9 @@ export function ProjectDetail() {
                         <LanguageBar values={item.languages} compact />
                       </td>
                       <td className="numeric">{item.source_file_count || 0}</td>
+                      <td>
+                        <TagChips tags={item.tags} max={3} />
+                      </td>
                       <td>
                         {item.claimed_by ? (
                           <span className="user-cell">
